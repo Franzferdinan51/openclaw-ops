@@ -241,6 +241,22 @@ EOF
   assert_contains "$output" "All health checks passed"
 }
 
+test_watchdog_escalates_on_persistent_task_registry_schema_failure() {
+  setup_fake_env
+  trap teardown_fake_env RETURN
+
+  export CURL_HTTP_STATUS=000
+  cat >"$HOME/.openclaw/logs/gateway.err.log" <<'EOF'
+[openclaw] Unhandled promise rejection: Error: NOT NULL constraint failed: task_runs.requester_session_key
+EOF
+
+  local output
+  output="$(bash "$ROOT_DIR/scripts/watchdog.sh" 2>&1 || true)"
+  assert_contains "$output" "Persistent task registry schema failure detected"
+  assert_contains "$output" "runtime/schema compatibility fix"
+  assert_not_contains "$output" "Attempting gateway restart"
+}
+
 test_security_scan_redacts_secret_values() {
   setup_fake_env
   trap teardown_fake_env RETURN
@@ -268,6 +284,7 @@ run_test test_security_scan_respects_maxdepth_for_permission_checks
 run_test test_get_openclaw_version_normalizes_missing_v_prefix
 run_test test_health_check_passes_for_valid_targets
 run_test test_health_check_falls_back_to_etime_on_macos
+run_test test_watchdog_escalates_on_persistent_task_registry_schema_failure
 run_test test_security_scan_redacts_secret_values
 
 printf 'All openclaw-ops tests passed\n'

@@ -13,6 +13,7 @@ HEAL_SCRIPT="$(cd "$(dirname "$0")" && pwd)/heal.sh"
 MAX_RESTART_ATTEMPTS=3
 RESTART_ATTEMPT_WINDOW=900  # 15 minutes
 STATE_FILE="$HOME/.openclaw/watchdog-state.json"
+RECENT_ERROR_WINDOW=600  # 10 minutes
 
 mkdir -p "$LOG_DIR"
 mkdir -p "$(dirname "$STATE_FILE")"
@@ -96,7 +97,38 @@ except:
 d['restarts'] = []
 d['last_ok'] = __import__('time').time()
 json.dump(d, open(state_file, 'w'))
-" "$STATE_FILE" 2>/dev/null || true
+	" "$STATE_FILE" 2>/dev/null || true
+}
+
+file_updated_recently() {
+  local file="$1"
+  [[ -f "$file" ]] || return 1
+
+  local mtime
+  mtime="$(file_mtime "$file" 2>/dev/null || true)"
+  [[ -n "$mtime" ]] || return 1
+
+  local now
+  now="$(date +%s)"
+  (( now - mtime <= RECENT_ERROR_WINDOW ))
+}
+
+detect_persistent_task_registry_schema_failure() {
+  local today_log="/tmp/openclaw/openclaw-$(date +%F).log"
+  local yesterday_log="/tmp/openclaw/openclaw-$(date_days_ago 1).log"
+  local file
+
+  for file in "$HOME/.openclaw/logs/gateway.err.log" "$today_log" "$yesterday_log"; do
+    if ! file_updated_recently "$file"; then
+      continue
+    fi
+    if tail -200 "$file" 2>/dev/null | grep -Fq "NOT NULL constraint failed: task_runs.requester_session_key"; then
+      printf '%s\n' "$file"
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 # ── Gateway health check ──────────────────────────────────────────────────────
@@ -114,6 +146,12 @@ fi
 
 # ── Gateway is down ───────────────────────────────────────────────────────────
 log "Gateway unreachable (HTTP $HTTP_STATUS)"
+
+if SCHEMA_ERROR_FILE="$(detect_persistent_task_registry_schema_failure)"; then
+  log "Persistent task registry schema failure detected in $SCHEMA_ERROR_FILE — skipping restart loop"
+  log "ESCALATION: Gateway needs a runtime/schema compatibility fix, not another watchdog restart."
+  exit 1
+fi
 
 RESTART_COUNT=$(get_restart_count)
 log "Restart attempts in last ${RESTART_ATTEMPT_WINDOW}s: $RESTART_COUNT"
